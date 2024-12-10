@@ -5,7 +5,7 @@
   "scripts": {
     "test": "hardhat test ",
     "compile": "hardhat compile",
-    "deploy": "hardhat run scripts/deploy-calculator.js --network shield",
+    "deploy": "hardhat run scripts/deploy-contract.js --network shield",
     "node": "hardhat node",
     "test:local": "hardhat test --network localhost"
   },
