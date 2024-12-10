@@ -49,11 +49,35 @@ contract EncryptedIQCalculator {
         _;
     }
     
-    function createGroup(bytes32 groupId) external groupNotFinalized(groupId) {
-        require(activeGroups[groupId].owner == address(0), "Group exists");
-        
+    function createGroup(bytes32 groupId) external {
+        // First check if room exists in active groups
+        require(activeGroups[groupId].owner == address(0), "Group exists in active groups");
+    
+        // Then check if room exists in finalized results 
+        require(finalizedResults[groupId].encryptedSum.length == 0, "Group exists in finalized results");
+
         activeGroups[groupId].owner = msg.sender;
         emit GroupCreated(groupId, msg.sender);
+    }
+
+
+    function getGroupDetails(bytes32 groupId) external view returns (
+        address owner,
+        uint256 participantCount,
+        bool isActive
+    ) {
+        ActiveGroup storage group = activeGroups[groupId];
+        owner = group.owner;
+        participantCount = group.encryptedScores.length;
+        isActive = (owner != address(0) && finalizedResults[groupId].encryptedSum.length == 0);
+        return (owner, participantCount, isActive);
+    }
+
+
+     function hasParticipantSubmitted(bytes32 groupId, address participant) external view returns (bool) {
+        require(activeGroups[groupId].owner != address(0) || finalizedResults[groupId].encryptedSum.length > 0, 
+                "Group does not exist");
+        return activeGroups[groupId].hasSubmitted[participant];
     }
     
     function submitScore(
