@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "Matchmaking contract for Caldera deployment",
   "scripts": {
-    "test": "hardhat test",
+    "test": "hardhat test ",
     "compile": "hardhat compile",
-    "deploy": "hardhat run scripts/deploy.js --network caldera_testnet",
+    "deploy": "hardhat run scripts/deploy-calculator.js --network shield",
     "node": "hardhat node",
     "test:local": "hardhat test --network localhost"
   },

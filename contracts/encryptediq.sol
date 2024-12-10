@@ -2,8 +2,6 @@
 pragma solidity ^0.8.24;
 
 import "./Paillier.sol";
-import "hardhat/console.sol";
-
 
 contract EncryptedIQCalculator {
     using BigNum for *;
@@ -14,13 +12,18 @@ contract EncryptedIQCalculator {
         mapping(address => bool) hasSubmitted;
     }
     
+    struct GroupResult {
+        bytes encryptedSum;
+        uint256 count;
+    }
+    
     Paillier public paillier;
     mapping(bytes32 => ActiveGroup) public activeGroups;
-    mapping(bytes32 => bytes) public finalizedAverages;
+    mapping(bytes32 => GroupResult) public finalizedResults;
     
     event GroupCreated(bytes32 indexed groupId, address owner);
     event ScoreSubmitted(bytes32 indexed groupId, address indexed participant);
-    event GroupFinalized(bytes32 indexed groupId, bytes encryptedAverage);
+    event GroupFinalized(bytes32 indexed groupId, bytes encryptedSum, uint256 count);
     
     constructor(address _paillier) {
         paillier = Paillier(_paillier);
@@ -32,7 +35,7 @@ contract EncryptedIQCalculator {
     }
 
     modifier groupNotFinalized(bytes32 groupId) {
-        require(finalizedAverages[groupId].length == 0, "Group already finalized");
+        require(finalizedResults[groupId].encryptedSum.length == 0, "Group already finalized");
         _;
     }
 
@@ -79,55 +82,55 @@ contract EncryptedIQCalculator {
         bytes32 groupId,
         PublicKey calldata publicKey
     ) external onlyGroupOwner(groupId) groupNotFinalized(groupId) {
-        console.log("hellllllllllllllllllllo");
         ActiveGroup storage group = activeGroups[groupId];
         require(group.encryptedScores.length > 0, "No scores");
 
-        // Calculate average
-        BigNumber memory average = _calculateAverage(groupId, publicKey);
+        // Calculate sum
+        BigNumber memory sum = _calculateSum(groupId, publicKey);
+        uint256 count = group.encryptedScores.length;
         
-        // Store only the encrypted average
-        finalizedAverages[groupId] = average.val;
-
-        console.log("average given");
+        // Store both sum and count
+        finalizedResults[groupId] = GroupResult({
+            encryptedSum: sum.val,
+            count: count
+        });
         
-        emit GroupFinalized(groupId, average.val);
+        emit GroupFinalized(groupId, sum.val, count);
 
         // Delete the active group data
         delete activeGroups[groupId];
     }
     
-    function getAverage(bytes32 groupId) external view returns (bytes memory) {
-        require(finalizedAverages[groupId].length > 0, "Not finalized");
-        return finalizedAverages[groupId];
+    function getResult(bytes32 groupId) external view returns (bytes memory sum, uint256 count) {
+        require(finalizedResults[groupId].encryptedSum.length > 0, "Not finalized");
+        GroupResult memory result = finalizedResults[groupId];
+        return (result.encryptedSum, result.count);
     }
 
     function isFinalized(bytes32 groupId) external view returns (bool) {
-        return finalizedAverages[groupId].length > 0;
+        return finalizedResults[groupId].encryptedSum.length > 0;
     }
 
-    // Internal function to calculate the average
-    function _calculateAverage(
+    // Internal function to calculate only the sum
+    function _calculateSum(
         bytes32 groupId,
         PublicKey calldata publicKey
     ) internal view returns (BigNumber memory) {
         ActiveGroup storage group = activeGroups[groupId];
         BigNumber memory total = group.encryptedScores[0];
         
+ 
+        
         // Sum all encrypted scores
         for (uint256 i = 1; i < group.encryptedScores.length; i++) {
+          
             total = paillier.add(
-                total.tobytes(),
-                group.encryptedScores[i].val,
+                Ciphertext(total.val),
+                Ciphertext(group.encryptedScores[i].val),
                 publicKey
             );
         }
         
-        // Divide by number of participants to get average
-        return paillier.div_const(
-            Ciphertext(total.val),
-            group.encryptedScores.length,
-            publicKey
-        );
+        return total;
     }
 }
