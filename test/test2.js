@@ -1,169 +1,231 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { generateRandomKeys } = require("paillier-bigint");
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
-describe("EncryptedIQCalculator", function () {
-  let paillier, iqCalculator;
-  let owner, user1, user2, user3;
-  let groupId;
-  let publicKey, privateKey;
+describe("VotingRoom", function () {
+  let VotingRoom;
+  let votingRoom;
+  let owner;
+  let addr1;
+  let addr2;
+  let addrs;
 
-  function bigIntToHex(bigIntValue) {
-    let hexStr = bigIntValue.toString(16);
-    if (hexStr.length % 2 !== 0) {
-      hexStr = '0' + hexStr;
-    }
-    return '0x' + hexStr;
-  }
+  // Helper function to create a room ID
+  const createRoomId = (str) => ethers.keccak256(ethers.toUtf8Bytes(str));
 
-  beforeEach(async () => {
-    [owner, user1, user2, user3] = await ethers.getSigners();
-    
-    groupId = ethers.keccak256(ethers.toUtf8Bytes("group-" + Date.now()));
-
-    const Paillier = await ethers.getContractFactory("Paillier");
-    paillier = await Paillier.deploy();
-
-    const EncryptedIQCalculator = await ethers.getContractFactory("EncryptedIQCalculator");
-    iqCalculator = await EncryptedIQCalculator.deploy(await paillier.getAddress());
-
-    const keys = await generateRandomKeys(2048);
-    publicKey = keys.publicKey;
-    privateKey = keys.privateKey;
+  beforeEach(async function () {
+    VotingRoom = await ethers.getContractFactory("VotingRoom");
+    [owner, addr1, addr2, ...addrs] = await ethers.getSigners();
+    votingRoom = await VotingRoom.deploy();
+    await votingRoom.waitForDeployment();
   });
 
-  describe("Group Creation and Validation", function() {
-    it("Should allow creating a new group", async function() {
-      await expect(iqCalculator.createGroup(groupId))
-        .to.emit(iqCalculator, "GroupCreated")
-        .withArgs(groupId, owner.address);
-    });
-
-    it("Should not allow creating a group that exists in active groups", async function() {
-      await iqCalculator.createGroup(groupId);
-      await expect(iqCalculator.createGroup(groupId))
-        .to.be.revertedWith("Group exists in active groups");
-    });
-
-    it("Should not allow creating a group that exists in finalized results", async function() {
-      await iqCalculator.createGroup(groupId);
-      
-      // Submit a score and finalize the group
-      const score = bigIntToHex(publicKey.encrypt(BigInt(100)));
-      await iqCalculator.connect(user1).submitScore(groupId, score);
-      
-      const publicKeyForContract = {
-        n: bigIntToHex(publicKey.n),
-        g: bigIntToHex(publicKey.g)
-      };
-      
-      await iqCalculator.finalizeGroup(groupId, publicKeyForContract);
-      
-      // Try to create the same group again
-      await expect(iqCalculator.createGroup(groupId))
-        .to.be.revertedWith("Group exists in finalized results");
+  describe("Deployment", function () {
+    it("Should set the right owner", async function () {
+      expect(await votingRoom.owner()).to.equal(owner.address);
     });
   });
 
-  describe("Group Details and Participant Status", function() {
-    beforeEach(async function() {
-      await iqCalculator.createGroup(groupId);
+  describe("Room Creation", function () {
+    it("Should allow owner to create a room", async function () {
+      const roomId = createRoomId("test-room");
+      const memberIds = [1, 2, 3];
+
+      await expect(votingRoom.createRoom(roomId, memberIds))
+        .to.emit(votingRoom, "RoomCreated")
+        .withArgs(roomId, await time.latest());
     });
 
-    it("Should correctly return group details", async function() {
-      const [groupOwner, participantCount, isActive] = await iqCalculator.getGroupDetails(groupId);
-      
-      expect(groupOwner).to.equal(owner.address);
-      expect(participantCount).to.equal(0);
-      expect(isActive).to.be.true;
+    it("Should not allow non-owner to create a room", async function () {
+      const roomId = createRoomId("test-room");
+      const memberIds = [1, 2, 3];
+
+      await expect(
+        votingRoom.connect(addr1).createRoom(roomId, memberIds)
+      ).to.be.revertedWith("Only contract owner can perform this action");
     });
 
-    it("Should correctly track participant submissions", async function() {
-      const score = bigIntToHex(publicKey.encrypt(BigInt(100)));
-      await iqCalculator.connect(user1).submitScore(groupId, score);
+    it("Should not allow duplicate member IDs", async function () {
+      const roomId = createRoomId("test-room");
+      const memberIds = [1, 1, 2];
 
-      expect(await iqCalculator.hasParticipantSubmitted(groupId, user1.address)).to.be.true;
-      expect(await iqCalculator.hasParticipantSubmitted(groupId, user2.address)).to.be.false;
+      await expect(
+        votingRoom.createRoom(roomId, memberIds)
+      ).to.be.revertedWith("Duplicate member ID");
     });
 
-    it("Should update group details after submissions", async function() {
-      const score = bigIntToHex(publicKey.encrypt(BigInt(100)));
-      await iqCalculator.connect(user1).submitScore(groupId, score);
-      await iqCalculator.connect(user2).submitScore(groupId, score);
+    it("Should not allow empty member list", async function () {
+      const roomId = createRoomId("test-room");
+      const memberIds = [];
 
-      const [, participantCount, isActive] = await iqCalculator.getGroupDetails(groupId);
-      expect(participantCount).to.equal(2);
-      expect(isActive).to.be.true;
-    });
-  });
-
-  describe("Score Submission and Finalization", function() {
-    beforeEach(async function() {
-      await iqCalculator.createGroup(groupId);
-    });
-
-    it("Should not allow double submission from same participant", async function() {
-      const score = bigIntToHex(publicKey.encrypt(BigInt(100)));
-      await iqCalculator.connect(user1).submitScore(groupId, score);
-      
-      await expect(iqCalculator.connect(user1).submitScore(groupId, score))
-        .to.be.revertedWith("Already submitted score");
-    });
-
-    it("Should correctly calculate sum and count in finalization", async function() {
-      const scores = [95, 105, 100];
-      for (let i = 0; i < scores.length; i++) {
-        const encryptedScore = bigIntToHex(publicKey.encrypt(BigInt(scores[i])));
-        await iqCalculator.connect([user1, user2, user3][i]).submitScore(groupId, encryptedScore);
-      }
-
-      const publicKeyForContract = {
-        n: bigIntToHex(publicKey.n),
-        g: bigIntToHex(publicKey.g)
-      };
-
-      await iqCalculator.finalizeGroup(groupId, publicKeyForContract);
-      
-      const [encryptedSum, count] = await iqCalculator.getResult(groupId);
-      const decryptedSum = Number(privateKey.decrypt(BigInt(encryptedSum)));
-      const average = decryptedSum / Number(count);
-
-      expect(count).to.equal(3);
-      expect(average).to.be.approximately(100, 1);
+      await expect(
+        votingRoom.createRoom(roomId, memberIds)
+      ).to.be.revertedWith("Cannot create empty room");
     });
   });
 
-  describe("Group Status Checks", function() {
-    it("Should correctly track finalization status", async function() {
-      await iqCalculator.createGroup(groupId);
-      expect(await iqCalculator.isFinalized(groupId)).to.be.false;
+  describe("Voting", function () {
+    let roomId;
+    const memberIds = [1, 2, 3];
 
-      const score = bigIntToHex(publicKey.encrypt(BigInt(100)));
-      await iqCalculator.connect(user1).submitScore(groupId, score);
-
-      const publicKeyForContract = {
-        n: bigIntToHex(publicKey.n),
-        g: bigIntToHex(publicKey.g)
-      };
-      
-      await iqCalculator.finalizeGroup(groupId, publicKeyForContract);
-      expect(await iqCalculator.isFinalized(groupId)).to.be.true;
+    beforeEach(async function () {
+      roomId = createRoomId("test-room");
+      await votingRoom.createRoom(roomId, memberIds);
     });
 
-    it("Should prevent actions on finalized groups", async function() {
-      await iqCalculator.createGroup(groupId);
-      const score = bigIntToHex(publicKey.encrypt(BigInt(100)));
-      await iqCalculator.connect(user1).submitScore(groupId, score);
+    it("Should allow valid votes", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
 
-      const publicKeyForContract = {
-        n: bigIntToHex(publicKey.n),
-        g: bigIntToHex(publicKey.g)
-      };
+      await expect(votingRoom.connect(addr1).submitVotes(roomId, votes))
+        .to.emit(votingRoom, "VotesSubmitted")
+        .withArgs(roomId, addr1.address);
+
+      // Finalize room to verify votes
+      await votingRoom.finalizeRoom(roomId);
+      const finalDetails = await votingRoom.getFinalizedRoomDetails(roomId);
       
-      await iqCalculator.finalizeGroup(groupId, publicKeyForContract);
+      // Verify votes in finalized details
+      expect(finalDetails.finalMemberVotes[0].voteCount).to.equal(100);
+      expect(finalDetails.finalMemberVotes[1].voteCount).to.equal(200);
+      expect(finalDetails.finalMemberVotes[2].voteCount).to.equal(300);
+    });
 
-      await expect(iqCalculator.connect(user2).submitScore(groupId, score))
-        .to.be.reverted;
+    it("Should not allow duplicate votes from same user", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
+
+      await votingRoom.connect(addr1).submitVotes(roomId, votes);
+
+      await expect(
+        votingRoom.connect(addr1).submitVotes(roomId, votes)
+      ).to.be.revertedWith("Already voted");
+    });
+
+    it("Should not allow votes after 24 hours", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
+
+      await time.increase(25 * 60 * 60);
+
+      await expect(
+        votingRoom.connect(addr1).submitVotes(roomId, votes)
+      ).to.be.revertedWith("Voting period ended");
+    });
+
+    it("Should not allow incomplete votes", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 }
+      ];
+
+      await expect(
+        votingRoom.connect(addr1).submitVotes(roomId, votes)
+      ).to.be.revertedWith("Must vote for all members");
+    });
+
+    it("Should not allow duplicate member votes", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 1, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
+
+      await expect(
+        votingRoom.connect(addr1).submitVotes(roomId, votes)
+      ).to.be.revertedWith("Duplicate vote for member");
+    });
+  });
+
+  describe("Room Finalization", function () {
+    let roomId;
+    const memberIds = [1, 2, 3];
+
+    beforeEach(async function () {
+      roomId = createRoomId("test-room");
+      await votingRoom.createRoom(roomId, memberIds);
+    });
+
+    it("Should allow owner to finalize room and return correct details", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
+
+      // Submit votes from multiple participants
+      await votingRoom.connect(addr1).submitVotes(roomId, votes);
+      await votingRoom.connect(addr2).submitVotes(roomId, votes);
+
+      // Finalize room
+      await expect(votingRoom.finalizeRoom(roomId))
+        .to.emit(votingRoom, "RoomFinalized")
+        .withArgs(roomId);
+
+      // Get and verify finalized details
+      const finalDetails = await votingRoom.getFinalizedRoomDetails(roomId);
+      expect(finalDetails.totalParticipants).to.equal(2); // Two participants voted
+      expect(finalDetails.finalMemberVotes.length).to.equal(3); // Three members
+      expect(finalDetails.finalMemberVotes[0].voteCount).to.equal(200); // Sum of votes from both participants
+      expect(finalDetails.timestamp).to.not.equal(0);
+    });
+
+    it("Should not allow non-owner to finalize room", async function () {
+      await expect(
+        votingRoom.connect(addr1).finalizeRoom(roomId)
+      ).to.be.revertedWith("Only contract owner can perform this action");
+    });
+
+    it("Should not allow voting after finalization", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
+
+      await votingRoom.connect(addr1).submitVotes(roomId, votes);
+      await votingRoom.finalizeRoom(roomId);
+
+      await expect(
+        votingRoom.connect(addr2).submitVotes(roomId, votes)
+      ).to.be.revertedWith("Room already finalized");
+    });
+
+    it("Should not allow access to finalized details for non-finalized room", async function () {
+      await expect(
+        votingRoom.getFinalizedRoomDetails(roomId)
+      ).to.be.revertedWith("Room not finalized");
+    });
+  });
+
+  describe("View Functions", function () {
+    let roomId;
+    const memberIds = [1, 2, 3];
+
+    beforeEach(async function () {
+      roomId = createRoomId("test-room");
+      await votingRoom.createRoom(roomId, memberIds);
+    });
+
+    it("Should track participant voting status", async function () {
+      const votes = [
+        { memberId: 1, voteValue: 100 },
+        { memberId: 2, voteValue: 200 },
+        { memberId: 3, voteValue: 300 }
+      ];
+
+      await votingRoom.connect(addr1).submitVotes(roomId, votes);
+      expect(await votingRoom.hasParticipantVoted(roomId, addr1.address)).to.be.true;
+      expect(await votingRoom.hasParticipantVoted(roomId, addr2.address)).to.be.false;
     });
   });
 });
