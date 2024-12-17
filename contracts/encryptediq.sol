@@ -1,31 +1,34 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
+import "./Paillier.sol";
+
 
 contract VotingRoom {
     address public immutable owner;
+    Paillier public paillier;
+
 
     struct Member {
         uint256 id;
-        uint256 voteCount;
+        BigNumber voteCount;
     }
 
     struct Vote {
         uint256 memberId;
-        uint256 voteValue;
+        bytes voteValue;
     }
     
     struct ActiveRoom {
         uint256 timestamp;
         Member[] members;
         mapping(address => bool) hasVoted;
-        mapping(address => mapping(uint256 => uint256)) userVotes;
         address[] participants;
     }
     
     struct RoomResult {
         uint256 timestamp;
         uint256 totalParticipants;
-        mapping(uint256 => uint256) memberVotes;
+        mapping(uint256 => BigNumber) memberVotes;
         bool isFinalized;
     }
     
@@ -37,7 +40,7 @@ contract VotingRoom {
     
     mapping(bytes32 => ActiveRoom) public activeRooms;
     mapping(bytes32 => RoomResult) public finalizedResults;
-    mapping(bytes32 => Member[]) private finalizedMemberVotes;  // Store finalized member votes array
+    mapping(bytes32 => Member[]) private finalizedMemberVotes;  
     
     event RoomCreated(bytes32 indexed roomId, uint256 timestamp);
     event VotesSubmitted(bytes32 indexed roomId, address indexed voter);
@@ -68,8 +71,9 @@ contract VotingRoom {
         _;
     }
     
-    constructor() {
+    constructor(address _paillier) {
         owner = msg.sender;
+        paillier = Paillier(_paillier);
     }
 
   
@@ -91,11 +95,13 @@ contract VotingRoom {
         
         ActiveRoom storage newRoom = activeRooms[roomId];
         newRoom.timestamp = block.timestamp;
+       
+
         
         for(uint i = 0; i < memberIds.length; i++) {
             newRoom.members.push(Member({
                 id: memberIds[i],
-                voteCount: 0
+                voteCount: BigNumber(BigNum.ZERO, false, 0)
             }));
         }
         
@@ -104,7 +110,8 @@ contract VotingRoom {
     
     function submitVotes(
         bytes32 roomId,
-        Vote[] calldata votes
+        Vote[] calldata votes,
+        PublicKey calldata publicKey
     ) external 
         roomNotFinalized(roomId)
         roomExists(roomId)
@@ -132,8 +139,14 @@ contract VotingRoom {
             // Find member and record vote
             for(uint j = 0; j < room.members.length; j++) {
                 if(room.members[j].id == votes[i].memberId) {
-                    room.members[j].voteCount += votes[i].voteValue;
-                    room.userVotes[msg.sender][votes[i].memberId] = votes[i].voteValue;
+                    // adding vote to that particular memeber
+                    BigNumber memory currentVote = BigNumber(votes[i].voteValue, false, BigNum.bitLength(votes[i].voteValue));
+
+                    if (isZeroBigNumber(room.members[j].voteCount)) {
+                        room.members[j].voteCount = currentVote;
+                    } else {
+                        room.members[j].voteCount = paillier.add(Ciphertext(room.members[j].voteCount.val), Ciphertext(currentVote.val) , publicKey);
+                    }
                     memberFound = true;
                     break;
                 }
@@ -206,5 +219,24 @@ contract VotingRoom {
         require(activeRooms[roomId].timestamp != 0 || finalizedResults[roomId].isFinalized, 
                 "Room does not exist");
         return activeRooms[roomId].hasVoted[participant];
+    }
+
+    function isZeroBigNumber(BigNumber memory a) internal pure returns(bool) {
+    
+        bool isValueZero = true;
+        bytes memory val = a.val;
+        uint256 length = val.length;
+        
+        for(uint i = 0; i < length; i++) {
+            if(val[i] != 0) {
+                isValueZero = false;
+                break;
+            }
+        }
+        
+        return isValueZero && 
+            length == 0x20 && 
+            !a.neg && 
+            a.bitlen == 0;
     }
 }

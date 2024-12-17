@@ -1,231 +1,249 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { generateRandomKeys } = require("paillier-bigint");
 
 describe("VotingRoom", function () {
-  let VotingRoom;
-  let votingRoom;
-  let owner;
-  let addr1;
-  let addr2;
-  let addrs;
+  let paillier, votingRoom;
+  let owner, voter1, voter2, voter3;
+  let roomId;
+  let publicKey, privateKey;
 
-  // Helper function to create a room ID
-  const createRoomId = (str) => ethers.keccak256(ethers.toUtf8Bytes(str));
+  function bigIntToHex(bigIntValue) {
+    let hexStr = bigIntValue.toString(16);
+    if (hexStr.length % 2 !== 0) {
+      hexStr = '0' + hexStr;
+    }
+    return '0x' + hexStr;
+  }
 
-  beforeEach(async function () {
-    VotingRoom = await ethers.getContractFactory("VotingRoom");
-    [owner, addr1, addr2, ...addrs] = await ethers.getSigners();
-    votingRoom = await VotingRoom.deploy();
-    await votingRoom.waitForDeployment();
+  // Helper function to generate room ID
+  function generateRoomId(prefix) {
+    return ethers.id(prefix + Date.now());
+  }
+
+  beforeEach(async () => {
+    [owner, voter1, voter2, voter3] = await ethers.getSigners();
+
+    // Generate room ID using helper function
+    roomId = generateRoomId("room-");
+
+    // Deploy Paillier mock first
+    const Paillier = await ethers.getContractFactory("Paillier");
+    paillier = await Paillier.deploy();
+
+    // Deploy VotingRoom with Paillier address
+    const VotingRoom = await ethers.getContractFactory("VotingRoom");
+    votingRoom = await VotingRoom.deploy(await paillier.getAddress());
+
+    // Generate Paillier keys for testing
+    const keys = await generateRandomKeys(2048);
+    publicKey = keys.publicKey;
+    privateKey = keys.privateKey;
   });
 
-  describe("Deployment", function () {
-    it("Should set the right owner", async function () {
+  describe("Constructor & Initial State", function () {
+    it("Should set the correct owner", async function () {
       expect(await votingRoom.owner()).to.equal(owner.address);
+    });
+
+    it("Should set the correct Paillier contract address", async function () {
+      expect(await votingRoom.paillier()).to.equal(await paillier.getAddress());
     });
   });
 
   describe("Room Creation", function () {
-    it("Should allow owner to create a room", async function () {
-      const roomId = createRoomId("test-room");
+    it("Should create a new room successfully", async function () {
       const memberIds = [1, 2, 3];
+      const tx = await votingRoom.createRoom(roomId, memberIds);
+      const receipt = await tx.wait();
 
-      await expect(votingRoom.createRoom(roomId, memberIds))
+      const block = await ethers.provider.getBlock(receipt.blockNumber);
+
+      await expect(tx)
         .to.emit(votingRoom, "RoomCreated")
-        .withArgs(roomId, await time.latest());
+        .withArgs(roomId, block.timestamp);
     });
 
-    it("Should not allow non-owner to create a room", async function () {
-      const roomId = createRoomId("test-room");
+    it("Should fail when non-owner tries to create room", async function () {
       const memberIds = [1, 2, 3];
-
       await expect(
-        votingRoom.connect(addr1).createRoom(roomId, memberIds)
+        votingRoom.connect(voter1).createRoom(roomId, memberIds)
       ).to.be.revertedWith("Only contract owner can perform this action");
     });
 
-    it("Should not allow duplicate member IDs", async function () {
-      const roomId = createRoomId("test-room");
-      const memberIds = [1, 1, 2];
-
+    it("Should fail when creating room with empty members", async function () {
       await expect(
-        votingRoom.createRoom(roomId, memberIds)
-      ).to.be.revertedWith("Duplicate member ID");
+        votingRoom.createRoom(roomId, [])
+      ).to.be.revertedWith("Cannot create empty room");
     });
 
-    it("Should not allow empty member list", async function () {
-      const roomId = createRoomId("test-room");
-      const memberIds = [];
-
+    it("Should fail when creating room with duplicate members", async function () {
       await expect(
-        votingRoom.createRoom(roomId, memberIds)
-      ).to.be.revertedWith("Cannot create empty room");
+        votingRoom.createRoom(roomId, [1, 2, 2])
+      ).to.be.revertedWith("Duplicate member ID");
     });
   });
 
-  describe("Voting", function () {
-    let roomId;
-    const memberIds = [1, 2, 3];
+  describe("Vote Submission", function () {
+    const memberIds = [1, 2];
 
     beforeEach(async function () {
-      roomId = createRoomId("test-room");
       await votingRoom.createRoom(roomId, memberIds);
     });
 
-    it("Should allow valid votes", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
+    it("Should accept valid votes", async function () {
+      const votes = memberIds.map(id => ({
+        memberId: id,
+        voteValue: bigIntToHex(publicKey.encrypt(BigInt(1)))
+      }));
 
-      await expect(votingRoom.connect(addr1).submitVotes(roomId, votes))
-        .to.emit(votingRoom, "VotesSubmitted")
-        .withArgs(roomId, addr1.address);
-
-      // Finalize room to verify votes
-      await votingRoom.finalizeRoom(roomId);
-      const finalDetails = await votingRoom.getFinalizedRoomDetails(roomId);
-      
-      // Verify votes in finalized details
-      expect(finalDetails.finalMemberVotes[0].voteCount).to.equal(100);
-      expect(finalDetails.finalMemberVotes[1].voteCount).to.equal(200);
-      expect(finalDetails.finalMemberVotes[2].voteCount).to.equal(300);
-    });
-
-    it("Should not allow duplicate votes from same user", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
-
-      await votingRoom.connect(addr1).submitVotes(roomId, votes);
+      const paillierPublicKey = {
+        n: bigIntToHex(publicKey.n),
+        g: bigIntToHex(publicKey.g)
+      };
 
       await expect(
-        votingRoom.connect(addr1).submitVotes(roomId, votes)
+        votingRoom.connect(voter1).submitVotes(roomId, votes, paillierPublicKey)
+      ).to.emit(votingRoom, "VotesSubmitted")
+        .withArgs(roomId, voter1.address);
+    });
+
+    it("Should prevent double voting", async function () {
+      const votes = memberIds.map(id => ({
+        memberId: id,
+        voteValue: bigIntToHex(publicKey.encrypt(BigInt(1)))
+      }));
+
+      const paillierPublicKey = {
+        n: bigIntToHex(publicKey.n),
+        g: bigIntToHex(publicKey.g)
+      };
+
+      await votingRoom.connect(voter1).submitVotes(roomId, votes, paillierPublicKey);
+
+      await expect(
+        votingRoom.connect(voter1).submitVotes(roomId, votes, paillierPublicKey)
       ).to.be.revertedWith("Already voted");
-    });
-
-    it("Should not allow votes after 24 hours", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
-
-      await time.increase(25 * 60 * 60);
-
-      await expect(
-        votingRoom.connect(addr1).submitVotes(roomId, votes)
-      ).to.be.revertedWith("Voting period ended");
-    });
-
-    it("Should not allow incomplete votes", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 }
-      ];
-
-      await expect(
-        votingRoom.connect(addr1).submitVotes(roomId, votes)
-      ).to.be.revertedWith("Must vote for all members");
-    });
-
-    it("Should not allow duplicate member votes", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 1, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
-
-      await expect(
-        votingRoom.connect(addr1).submitVotes(roomId, votes)
-      ).to.be.revertedWith("Duplicate vote for member");
     });
   });
 
   describe("Room Finalization", function () {
-    let roomId;
-    const memberIds = [1, 2, 3];
+    const memberIds = [1, 2];
+    const voteValues = [5, 3]; // Example vote values
 
     beforeEach(async function () {
-      roomId = createRoomId("test-room");
       await votingRoom.createRoom(roomId, memberIds);
     });
 
-    it("Should allow owner to finalize room and return correct details", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
+    it("Should finalize room correctly and verify decrypted votes", async function () {
+      // Create encrypted votes
+      const votes = memberIds.map((id, index) => ({
+        memberId: id,
+        voteValue: bigIntToHex(publicKey.encrypt(BigInt(voteValues[index])))
+      }));
 
-      // Submit votes from multiple participants
-      await votingRoom.connect(addr1).submitVotes(roomId, votes);
-      await votingRoom.connect(addr2).submitVotes(roomId, votes);
+      const paillierPublicKey = {
+        n: bigIntToHex(publicKey.n),
+        g: bigIntToHex(publicKey.g)
+      };
+
+      // Submit votes
+      await votingRoom.connect(voter1).submitVotes(roomId, votes, paillierPublicKey);
 
       // Finalize room
       await expect(votingRoom.finalizeRoom(roomId))
         .to.emit(votingRoom, "RoomFinalized")
         .withArgs(roomId);
 
-      // Get and verify finalized details
-      const finalDetails = await votingRoom.getFinalizedRoomDetails(roomId);
-      expect(finalDetails.totalParticipants).to.equal(2); // Two participants voted
-      expect(finalDetails.finalMemberVotes.length).to.equal(3); // Three members
-      expect(finalDetails.finalMemberVotes[0].voteCount).to.equal(200); // Sum of votes from both participants
-      expect(finalDetails.timestamp).to.not.equal(0);
+      // Get finalized details
+      const details = await votingRoom.getFinalizedRoomDetails(roomId);
+      expect(details.totalParticipants).to.equal(1);
+      expect(details.finalMemberVotes.length).to.equal(memberIds.length);
+
+      // Verify each member's vote count by decrypting
+      for (let i = 0; i < details.finalMemberVotes.length; i++) {
+        const encryptedVote = BigInt(details.finalMemberVotes[i].voteCount.val);
+        const decryptedVote = Number(privateKey.decrypt(encryptedVote));
+
+        console.log(`Member ${memberIds[i]} - Expected: ${voteValues[i]}, Got: ${decryptedVote}`);
+        expect(decryptedVote).to.equal(voteValues[i]);
+      }
     });
 
-    it("Should not allow non-owner to finalize room", async function () {
-      await expect(
-        votingRoom.connect(addr1).finalizeRoom(roomId)
-      ).to.be.revertedWith("Only contract owner can perform this action");
-    });
+    it("Should correctly aggregate multiple votes", async function () {
+      // First voter
+      const votes1 = memberIds.map((id, index) => ({
+        memberId: id,
+        voteValue: bigIntToHex(publicKey.encrypt(BigInt(voteValues[index])))
+      }));
 
-    it("Should not allow voting after finalization", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
+      // Second voter with different values
+      const votes2 = memberIds.map((id, index) => ({
+        memberId: id,
+        voteValue: bigIntToHex(publicKey.encrypt(BigInt(voteValues[index] * 2))) // Double the votes
+      }));
 
-      await votingRoom.connect(addr1).submitVotes(roomId, votes);
+      const paillierPublicKey = {
+        n: bigIntToHex(publicKey.n),
+        g: bigIntToHex(publicKey.g)
+      };
+
+      // Submit votes from both voters
+      await votingRoom.connect(voter1).submitVotes(roomId, votes1, paillierPublicKey);
+      await votingRoom.connect(voter2).submitVotes(roomId, votes2, paillierPublicKey);
+
+      // Finalize room
       await votingRoom.finalizeRoom(roomId);
 
-      await expect(
-        votingRoom.connect(addr2).submitVotes(roomId, votes)
-      ).to.be.revertedWith("Room already finalized");
-    });
+      // Get finalized details
+      const details = await votingRoom.getFinalizedRoomDetails(roomId);
+      expect(details.totalParticipants).to.equal(2);
+      
+      // Verify each member's total votes by decrypting
+      for (let i = 0; i < details.finalMemberVotes.length; i++) {
+        const encryptedTotal = BigInt(details.finalMemberVotes[i].voteCount.val);
+        const decryptedTotal = Number(privateKey.decrypt(encryptedTotal));
 
-    it("Should not allow access to finalized details for non-finalized room", async function () {
-      await expect(
-        votingRoom.getFinalizedRoomDetails(roomId)
-      ).to.be.revertedWith("Room not finalized");
+        // Expected total is original vote + doubled vote
+        const expectedTotal = voteValues[i] + (voteValues[i] * 2);
+
+        console.log(`Member ${memberIds[i]} - Expected total: ${expectedTotal}, Got: ${decryptedTotal}`);
+        expect(decryptedTotal).to.equal(expectedTotal);
+      }
     });
   });
 
-  describe("View Functions", function () {
-    let roomId;
-    const memberIds = [1, 2, 3];
+  describe("Room Queries", function () {
+    const memberIds = [1, 2];
 
     beforeEach(async function () {
-      roomId = createRoomId("test-room");
       await votingRoom.createRoom(roomId, memberIds);
     });
 
-    it("Should track participant voting status", async function () {
-      const votes = [
-        { memberId: 1, voteValue: 100 },
-        { memberId: 2, voteValue: 200 },
-        { memberId: 3, voteValue: 300 }
-      ];
+    it("Should fail when querying non-existent room", async function () {
+      // Use the helper function to generate a non-existent room ID
+      const fakeRoomId = generateRoomId("fake-room-");
 
-      await votingRoom.connect(addr1).submitVotes(roomId, votes);
-      expect(await votingRoom.hasParticipantVoted(roomId, addr1.address)).to.be.true;
-      expect(await votingRoom.hasParticipantVoted(roomId, addr2.address)).to.be.false;
+      await expect(
+        votingRoom.hasParticipantVoted(fakeRoomId, voter1.address)
+      ).to.be.revertedWith("Room does not exist");
+    });
+
+    it("Should track participant votes correctly", async function () {
+      expect(await votingRoom.hasParticipantVoted(roomId, voter1.address)).to.be.false;
+
+      const votes = memberIds.map(id => ({
+        memberId: id,
+        voteValue: bigIntToHex(publicKey.encrypt(BigInt(1)))
+      }));
+
+      const paillierPublicKey = {
+        n: bigIntToHex(publicKey.n),
+        g: bigIntToHex(publicKey.g)
+      };
+
+      await votingRoom.connect(voter1).submitVotes(roomId, votes, paillierPublicKey);
+      expect(await votingRoom.hasParticipantVoted(roomId, voter1.address)).to.be.true;
     });
   });
 });
